@@ -246,6 +246,10 @@ func defaultTestBackendConfig() *testBackendConfig {
 func setupBackend(t *testing.T, config *testBackendConfig) (logical.Backend, logical.Storage) {
 	b, storage := getBackend(t)
 
+	// Provide local in-cluster files so that loadConfig can load the pod's
+	// service account token when token_reviewer_jwt is not configured.
+	t.Cleanup(setupLocalFiles(t, b))
+
 	// test no certificate
 	data := map[string]interface{}{
 		"pem_keys":                          config.pems,

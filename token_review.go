@@ -28,6 +28,10 @@ type tokenReviewResult struct {
 	UID       string
 }
 
+// maxResponseBodySize caps how many bytes are read from a kubernetes API
+// response body, to prevent unbounded memory consumption.
+const maxResponseBodySize = 1 << 20 // 1 MiB
+
 // This exists so we can use a mock TokenReview when running tests
 type tokenReviewer interface {
 	Review(context.Context, *http.Client, string, []string) (*tokenReviewResult, error)
@@ -66,13 +70,14 @@ func (t *tokenReviewAPI) Review(ctx context.Context, client *http.Client, jwt st
 		return nil, err
 	}
 
-	// If we have a configured TokenReviewer JWT use it as the bearer, otherwise
-	// try to use the passed in JWT.
-	bearer := fmt.Sprintf("Bearer %s", jwt)
-	if len(t.config.TokenReviewerJWT) > 0 {
-		bearer = fmt.Sprintf("Bearer %s", t.config.TokenReviewerJWT)
+	// Only ever authenticate with the configured TokenReviewer JWT (which
+	// may have been loaded from this pod's local service account token).
+	// The client-submitted JWT must never be used as the bearer, so fail
+	// closed if no reviewer token is available.
+	if t.config.TokenReviewerJWT == "" {
+		return nil, errors.New("lookup failed: no token reviewer JWT is configured")
 	}
-	setRequestHeader(req, bearer)
+	setRequestHeader(req, fmt.Sprintf("Bearer %s", t.config.TokenReviewerJWT))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -137,11 +142,15 @@ func (t *tokenReviewAPI) Review(ctx context.Context, client *http.Client, jwt st
 // parseResponse takes the API response and either returns the appropriate error
 // or the TokenReview Object.
 func parseResponse(resp *http.Response) (*authv1.TokenReview, error) {
-	body, err := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	if len(body) > maxResponseBodySize {
+		return nil, fmt.Errorf("token review response body exceeded %d bytes", maxResponseBodySize)
+	}
 
 	// If the request was not a success create a kuberenets error
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusPartialContent {

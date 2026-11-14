@@ -49,21 +49,26 @@ func (w *serviceAccountGetterWrapper) annotations(ctx context.Context, client *h
 		return nil, err
 	}
 
-	// If we have a configured TokenReviewer JWT use it as the bearer, otherwise
-	// try to use the passed in JWT.
-	bearer := fmt.Sprintf("Bearer %s", jwtStr)
-	if len(w.config.TokenReviewerJWT) > 0 {
-		bearer = fmt.Sprintf("Bearer %s", w.config.TokenReviewerJWT)
+	// Only ever authenticate with the configured TokenReviewer JWT (which
+	// may have been loaded from this pod's local service account token).
+	// The client-submitted JWT must never be used as the bearer, so fail
+	// closed if no reviewer token is available.
+	if w.config.TokenReviewerJWT == "" {
+		return nil, errors.New("service account lookup failed: no token reviewer JWT is configured")
 	}
-	setRequestHeader(req, bearer)
+	setRequestHeader(req, fmt.Sprintf("Bearer %s", w.config.TokenReviewerJWT))
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	body, err := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxResponseBodySize {
+		return nil, fmt.Errorf("service account response body exceeded %d bytes", maxResponseBodySize)
 	}
 	if resp.StatusCode != http.StatusOK {
 		var errStatus metav1.Status

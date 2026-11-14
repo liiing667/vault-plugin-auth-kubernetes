@@ -7,7 +7,9 @@ import (
 	"context"
 	"crypto"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -560,6 +562,43 @@ func TestConfig_LocalCaJWT(t *testing.T) {
 				t.Fatalf("expected did not match actual: expected %#v\n got %#v\n", tc.expected, conf)
 			}
 		})
+	}
+}
+
+// TestConfig_LoadConfigFailsClosedWithoutReviewerJWT verifies that loadConfig
+// returns an error when neither token_reviewer_jwt nor a readable local
+// service account token is available, rather than falling back to the
+// client-submitted JWT.
+func TestConfig_LoadConfigFailsClosedWithoutReviewerJWT(t *testing.T) {
+	b, storage := getBackend(t)
+
+	// Simulate running outside a pod: the local service account token file
+	// does not exist.
+	b.(*kubeAuthBackend).localSATokenReader = newCachingFileReader(
+		filepath.Join(t.TempDir(), "missing-token"), jwtReloadPeriod, time.Now)
+
+	data := map[string]interface{}{
+		"kubernetes_host":    "host",
+		"kubernetes_ca_cert": testCACert,
+	}
+	req := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      configPath,
+		Storage:   storage,
+		Data:      data,
+	}
+
+	resp, err := b.HandleRequest(context.Background(), req)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%s resp:%#v\n", err, resp)
+	}
+
+	_, err = b.(*kubeAuthBackend).loadConfig(context.Background(), storage)
+	if err == nil {
+		t.Fatal("expected loadConfig to fail when no token reviewer JWT is available")
+	}
+	if !strings.Contains(err.Error(), "token_reviewer_jwt") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
